@@ -1,5 +1,4 @@
 #pragma once
-#include "minecraft/commands/Command.h"
 #include <climits>
 #include "myhook.h"
 #include <unordered_map>
@@ -13,5 +12,4 @@
 
 //void cmdhelper_init();
 Minecraft* getMC();
-void register_cmd(const std::string& name,void* fn,const std::string&des="mod");
 void register_shutdown(void*);

@@ -9,21 +9,24 @@ extern "C" {
 }
 static void* old_main;
 static std::list<void*> onsht;
+static void (*int_handler)();
 void register_shutdown(void* fn) {
     onsht.push_back(fn);
 }
+void set_int_handler(void* fn){
+    int_handler=(typeof(int_handler))fn;
+}
 void call_sht(int d) {
     for(auto i:onsht) {
-        ((void(*)())i)();
+        ((void(*)(int))i)(d);
     }
-    if(d==SIGINT) {
-        int pipefd[2];
-        pipe2(pipefd,0);
-        close(0);
-        dup2(pipefd[0],0);
-        write(pipefd[1],"stop\nstop\n",10);
-        close(pipefd[1]);
-        printf("\nshuting down... press enter,use stop instead at next time!\n");
+    if(d==SIGINT){
+        if(int_handler){
+            int_handler();
+        }else{
+            printf("stop handler not found!DO UNSAFE shutdown!\n");
+            exit(0);
+        }
     }
 }
 static void shthelper_reg() {

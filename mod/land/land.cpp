@@ -16,6 +16,11 @@
 #include<cmath>
 #include<deque>
 #include<dlfcn.h>
+#include<tuple>
+#include"rapidjson/document.h"
+#include<fstream>
+#include"../gui/gui.h"
+
 using std::string;
 using std::deque;
 #define min(a,b) ((a)<(b)?(a):(b))
@@ -24,7 +29,7 @@ using std::deque;
 //#define dbg_printf printf
 static int dummy(){return 0;}
 extern "C" {
-    void land_init(std::list<string>& modlist);
+    BDL_EXPORT void land_init(std::list<string>& modlist);
 }
 extern void load_helper(std::list<string>& modlist);
 typedef float R;
@@ -37,7 +42,7 @@ struct land {
     int x,y;
     int dx,dy;
     string owner;
-    int size() {
+    unsigned long size() {
         return dx*dy;
     }
     bool inland(int xx,int yy,int di) const {
@@ -111,57 +116,86 @@ static land* getLand_r(int x,int z,int dim) {
     }
     return NULL;
 }
-struct lc_ent {
-    int x,z,dim;
-    land* v;
+
+struct key_hash:public std::unary_function<std::tuple<int,int,int>,unsigned int>{
+    unsigned int operator()(const std::tuple<int,int,int>& k) const{
+        return ((std::get<0>(k)<<16)|(std::get<1>(k)))^(std::get<2>(k)<<24);
+    }
 };
-lc_ent cpool_2[100];
-std::list<int> cpool;
-static void cache_init(){
-	for(int i=0;i<100;++i) cpool_2[i].dim=4,cpool.push_back(i);
-}
-static void ccache() {
-    cpool.clear();
-    cache_init();
-}
-static bool cache_fetch(land** res,int x,int z,int dim) {
-    int fg=0;
-    int& found=fg; //dummy
-    for(auto &i_ :cpool) {
-	auto const &i=cpool_2[i_];
-        if(i.x==x && i.z==z && i.dim==dim) {
-            *res=i.v;
-            found=i_;
-            fg=1;
-            break;
+template<typename K,int cap>
+struct TMCache{
+    std::unordered_map<K,land*,key_hash> pools[2];
+    int nowptr=0;
+    void push(const K& k,land* v){
+        pools[nowptr].insert({k,v});
+        if(pools[nowptr].size()==cap){
+            nowptr=!nowptr;
+            pools[nowptr].clear();
         }
     }
-    if(fg) std::swap(cpool.front(),found);
-    return fg;
-}
-static land* cache_push(const lc_ent& en) {
-    int x=cpool.back();
-    cpool.pop_back();
-    cpool_2[x]=en;
-    cpool.push_front(x);
-    return en.v;
+    land* fetch(const K& k){
+        auto it=pools[nowptr].find(k);
+        if(it!=pools[nowptr].end()) return it->second;
+        it=pools[!nowptr].find(k);
+        if(it!=pools[!nowptr].end()) return it->second;
+        return nullptr;
+    }
+    void clear(){
+        pools[0].clear();
+        pools[1].clear();
+    }
+};
+static TMCache<std::tuple<int,int,int>,128 > tcache;
+static void ccache() {
+    tcache.clear();
 }
 land* getLand(int x,int z,int dim) {
     land* res;
-    if(cache_fetch(&res,x,z,dim)) return res;
-    return cache_push({x,z,dim,getLand_r(x,z,dim)});
+    if(res=tcache.fetch({x,z,dim})) return res;
+    res=getLand_r(x,z,dim);
+    tcache.push({x,z,dim},res);
+    return res;
 }
+
+int LAND_PRICE,LAND_PRICE2;
+using namespace rapidjson;
+void loadcfg(){
+    Document dc;
+    std::ifstream ff;
+    ff.open("config/land.json",std::ios::in);
+    char buf[1024*8];
+    buf[ff.readsome(buf,1024*8)]=0;
+    ff.close();
+    if(dc.ParseInsitu(buf).HasParseError()){
+        printf("[LAND] Config JSON ERROR!\n");
+        exit(1);
+    }
+    LAND_PRICE=dc["buy_price"].GetInt();
+    LAND_PRICE2=dc["sell_price"].GetInt();
+}
+unordered_map<string,int> choose_state;
 static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &outp) {
     int pl=(int)b.getPermissionsLevel();
     string name=b.getName();
     ARGSZ(1)
     if(a[0]=="start") {
-        startpos[name]=b.getWorldPosition();
-        outp.success("§e[Land system] 已选择点A，输入/land end选择另一个点");
+        choose_state[name]=1;
+        outp.success("§e[Land system] click ground to choose point A，输入/land end选择另一个点");
     }
     if(a[0]=="end") {
-        endpos[name]=b.getWorldPosition();
-        outp.success("§e[Land system] 已选择点B");
+        if(!startpos.count(name)){
+            outp.error("[Land system] 请选择开始");
+            return;
+        }
+        choose_state[name]=2;
+        outp.success("§e[Land system] click ground to choose point B");
+    }
+    if(a[0]=="exit"){
+        choose_state.erase(name);
+        return;
+    }
+    if(a[0]=="prebuy"){
+        choose_state.erase(name);
         if(startpos.count(name)+endpos.count(name)!=2) {
             outp.error("[Land system] 请选择开始和结束点");
         }
@@ -183,26 +217,45 @@ static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &
         }
         land tmp;
         tmp.x=xx,tmp.y=yy,tmp.dx=xx2-xx+1,tmp.dy=yy2-yy+1;
-        int price=1*tmp.size();
+        unsigned long price=LAND_PRICE*tmp.size();
+        if(price>420000000){
+            outp.error("[Land system] too big land");
+            startpos.erase(name);
+            endpos.erase(name);
+            return;
+        }
         char buf[1000];
         sprintf(buf,"§e[Land system] 选择完毕，该区域价格 %d,使用“/land buy”购买",price);
         outp.success(string(buf));
     }
     if(a[0]=="buy") {
+        choose_state.erase(name);
         if(startpos.count(name)+endpos.count(name)!=2) {
             outp.error("[Land system] 请选择开始和结束点");
-            return;
         }
         Vec3 pa=startpos[name];
         Vec3 pb=endpos[name];
         int xx(min(pa.x,pb.x)),yy(min(pa.z,pb.z)),xx2(max(pa.x,pb.x)),yy2(max(pa.z,pb.z)); //fix
+        int fg=0;
+        for(auto const& i:lands) {
+            if(i.coll(xx,xx2,yy,yy2,b.getEntity()->getDimensionId(),name) && pl==0) {
+                fg=1;
+                break;
+            }
+        }
+        if(fg) {
+            outp.error("[Land system] 领地不得重叠");
+            startpos.erase(name);
+            endpos.erase(name);
+            return;
+        }
         land tmp;
         tmp.x=xx,tmp.y=yy,tmp.dx=xx2-xx+1,tmp.dy=yy2-yy+1;
         tmp.addown(name);
         tmp.dim_perm=(b.getEntity()->getDimensionId()<<4)|PERMP;
-        int price=1*tmp.size();
-        if(price<0) {//阻止钻空子
-            outp.error("[Land system] 别想钻空子");
+        unsigned long price=LAND_PRICE*tmp.size();
+        if(price>420000000){
+            outp.error("[Land system] too big land");
             startpos.erase(name);
             endpos.erase(name);
             return;
@@ -212,6 +265,8 @@ static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &
             ccache();
             //save();
             outp.success("§e[Land system] 购买成功");
+            startpos.erase(name);
+            endpos.erase(name);
         } else {
             outp.error("[Land system] 你的余额不足");
         }
@@ -227,7 +282,6 @@ static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &
             char buf[1000];
             sprintf(buf,"§e[Land system] 这里是 %s 的领地",i->owner.c_str());
             outp.success(string(buf));
-            //sendText2(getplayer_byname(name),string(buf));
             return;
         } else {
             char buf[1000];
@@ -239,12 +293,10 @@ static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &
         int dim=b.getEntity()->getDimensionId();
         int x=round(b.getWorldPosition().x);
         int y=round(b.getWorldPosition().z); //fix
-        //for(auto& i:lands){
-        //   if(i.inland(x,y,dim) && i.checkown(name)){
         land* i=getLand(x,y,dim);
         if(i&&(i->checkown(name)||pl>0)) {
             char buf[1000];
-            int price=0*i->size();
+            int price=LAND_PRICE2*i->size();
             add_money(name,price);
             sprintf(buf,"§e[Land system] 领地出售成功，出售价格 %d",price);
             outp.success(string(buf));
@@ -273,6 +325,14 @@ static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &
         } else {
             outp.error("[Land system] 这不是你的领地");
         }
+    }
+    if(a[0]=="trustgui"){
+        string name=b.getName();
+        gui_ChoosePlayer((ServerPlayer*)b.getEntity(),"choose a player to trust","Land Req",[name](const string& dest){
+            auto xx=getMC()->getLevel()->getPlayer(name);
+                if(xx)
+                runcmdAs("land trust "+SafeStr(dest),xx);
+        });
     }
     if(a[0]=="untrust") {
         ARGSZ(2)
@@ -306,7 +366,7 @@ static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &
     }
 
     if(a[0]=="help") {
-        outp.error("领地系统指令列表:\n/land start ——选择起点（你站的地方）\n/land end ——选择终点\n/land buy ——选点之后买地（1格1金币）\n/land trust 玩家ID ——添加访客\n/land untrust 玩家ID ——删除访客\n/land sell ——卖地\n/land query ——查看当前领地主人\n/land perm 数字 ——指定具体权限(详细看github)");
+        outp.error("领地系统指令列表:\n/land start ——选择起点（你站的地方）\n/land end ——选择终点\n/land buy ——选点之后买地（1格10块）\n/land trust 玩家ID ——添加访客\n/land untrust 玩家ID ——删除访客\n/land sell ——卖地\n/land query ——查看当前领地主人\n/land perm 数字 ——指定具体权限(详细看github)");
     }
 }
 
@@ -329,17 +389,14 @@ static void load() {
     memtoset(lands,buf,land::fromstr);
 }
 
-static int handle_dest(GameMode* a0,BlockPos const& a1,unsigned char a2) {
+static int handle_dest(GameMode* a0,BlockPos const* a1) {
     int pl=a0->getPlayer()->getPlayerPermissionLevel();
     if(pl>1) {
-        //op
-        //printf("op\n");
         return 1;
     }
     const string& name=a0->getPlayer()->getName();
     int dim=a0->getPlayer()->getDimensionId();
-    int x(a1.x),y(a1.z),z(a1.z); //fixed
-    dbg_printf("use handle dim %d %d %d %d",dim,x,y,z);
+    int x(a1->x),y(a1->z),z(a1->z); //fixed
     land* i=getLand(x,y,dim);
     if(i&&!i->checkown(name)) {
         if(!i->canbuild(name)) {
@@ -353,15 +410,14 @@ static int handle_dest(GameMode* a0,BlockPos const& a1,unsigned char a2) {
     }
     return 1;
 }
-static int handle_atk(Player* a0,Actor & a1) {
+static bool handle_atk(ServerPlayer* a0,Actor * a1) {
     int pl=a0->getPlayerPermissionLevel();
     if(pl>1) {
-        //op
         return 1;
     }
     const string& name=a0->getName();
-    int dim=a1.getDimensionId();
-    Vec3 vc=a1.getPos();
+    int dim=a1->getDimensionId();
+    Vec3 vc=a1->getPos();
     int x(vc.x),y(vc.z); //fixed
     land* i=getLand(x,y,dim);
     if(i&&!i->checkown(name)) {
@@ -376,18 +432,25 @@ static int handle_atk(Player* a0,Actor & a1) {
     }
     return 1;
 }
-static int handle_useion(GameMode* a0,ItemStack & a1,BlockPos const& a2,unsigned char a3,Vec3 const& a4,Block const* a5) {
+static bool handle_useion(GameMode* a0,ItemStack * a1,BlockPos const* a2,BlockPos const* dstPos,Block const* a5) {
+    if(choose_state[a0->getPlayer()->getName()]!=0){
+        if(choose_state[a0->getPlayer()->getName()]==1){
+            startpos[a0->getPlayer()->getName()]={a2->x,a2->y,a2->z};
+            sendText(a0->getPlayer(),"chose point A");
+        }
+        if(choose_state[a0->getPlayer()->getName()]==2){
+            endpos[a0->getPlayer()->getName()]={a2->x,a2->y,a2->z};
+            sendText(a0->getPlayer(),"chose point B");
+        }
+        return 0;
+    }
     int pl=a0->getPlayer()->getPlayerPermissionLevel();
     if(pl>1) {
-        //op
         return 1;
     }
     const string& name=a0->getPlayer()->getName();
     int dim=a0->getPlayer()->getDimensionId();
-    int x(a2.x),y(a2.z),z(a2.z); //fixed
-    const int Z[]= {-1,1,0,0};
-    const int X[]= {0,0,-1,1};
-    if(a3>1 && a3<6) x+=X[a3-2],y+=Z[a3-2];
+    int x(dstPos->x),y(dstPos->z);
     land* i=getLand(x,y,dim);
     if(i&&!i->checkown(name)) {
         if(!i->canuse(name)) {
@@ -396,7 +459,7 @@ static int handle_useion(GameMode* a0,ItemStack & a1,BlockPos const& a2,unsigned
             sendText2(a0->getPlayer(),string(buf));
             return 0;
         } else {
-            return i->checkown(name) || a1.isNull();
+            return i->checkown(name) || a1->isNull();
         }
     }
     return 1;
@@ -405,11 +468,12 @@ static int handle_useion(GameMode* a0,ItemStack & a1,BlockPos const& a2,unsigned
 void land_init(std::list<string>& modlist) {
     printf("[LAND] loaded!\n");
     load();
-    cache_init();
+    loadcfg();
     MyHook(fp(dlsym(NULL,"_ZNK9FarmBlock15transformOnFallER11BlockSourceRK8BlockPosP5Actorf")),fp(dummy));
     register_cmd("land",(void*)oncmd,"领地系统");
-    reg_destroy(fp(handle_dest));
-    reg_useitemon(fp(handle_useion));
-    reg_attack(fp(handle_atk));
+    register_cmd("reload_land",fp(loadcfg),"reload land cfg",1);
+    reg_destroy(handle_dest);
+    reg_useitemon(handle_useion);
+    reg_attack(handle_atk);
     load_helper(modlist);
 }

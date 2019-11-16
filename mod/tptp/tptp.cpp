@@ -15,6 +15,7 @@
 #include<cmath>
 #include<cstdlib>
 #include<ctime>
+#include"../gui/gui.h"
 
 using std::string;
 using std::unordered_map;
@@ -24,7 +25,7 @@ using std::forward_list;
 //#define dbg_printf(...) {}
 #define dbg_printf printf
 extern "C" {
-    void tp_init(std::list<string>& modlist);
+   BDL_EXPORT void tp_init(std::list<string>& modlist);
 }
 extern void load_helper(std::list<string>& modlist);
 struct Vpos {
@@ -33,7 +34,6 @@ struct Vpos {
     Vpos() {}
     Vpos(int a,int b,int c,int d,string e) {
         x=a,y=b,z=c,dim=d,name=e;
-        //printf("new vpos %d %d %d\n",a,b,c);
     }
     static string tostr(const Vpos& a) {
         char buf[32768];
@@ -112,9 +112,36 @@ struct tpreq {
 static unordered_map<string,tpreq> tpmap;
 static unordered_map<string,int> wild_limit;
 static void oncmd_suic(std::vector<string>& a,CommandOrigin const & b,CommandOutput &outp) {
-    //b.getEntity()->kill();
     KillActor(b.getEntity());
     outp.success("§e你死了");
+}
+void sendTPForm(const string& from,int type,ServerPlayer* sp){
+    string cont=from+" wants to "+(type?"teleport to you":"teleport you to him");
+    string name=sp->getName();
+    auto lis=new list<pair<string,std::function<void()> > >();
+    lis->push_back({
+        "Accept",[name]{
+            auto x=getMC()->getLevel()->getPlayer(name);
+            if(x)
+                runcmdAs("tpa ac",x);
+        }
+    });
+    lis->push_back({
+        "Deny",[name]{
+            auto x=getMC()->getLevel()->getPlayer(name);
+            if(x)
+                runcmdAs("tpa de",x);
+        }
+    });
+    gui_Buttons(sp,cont,"TP Request",lis);
+}
+void sendTPChoose(ServerPlayer* sp,const string& type){
+    string name=sp->getName();
+    gui_ChoosePlayer(sp,"choose a player to send","TP Req",[name,type](const string& dest){
+        auto xx=getMC()->getLevel()->getPlayer(name);
+            if(xx)
+            runcmdAs("tpa "+type+" "+SafeStr(dest),xx);
+    });
 }
 static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &outp) {
     int pl=(int)b.getPermissionsLevel();
@@ -136,9 +163,9 @@ static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &
             return;
         }
         tpmap[dnm]= {0,name};
-        //printf("%p\n",dst);
         outp.success("§e[Teleport] 你向对方发送了传送请求");
         sendText(dst,"§e[Teleport] "+name+" 想让你传送到他/她所在的位置\n§e输入“/tpa ac” 接受 或 “/tpa de” 拒绝");
+        sendTPForm(name,1,(ServerPlayer*)dst);
     }
     if(a[0]=="t") {
         //to
@@ -153,6 +180,29 @@ static void oncmd(std::vector<string>& a,CommandOrigin const & b,CommandOutput &
         tpmap[dnm]= {1,name};
         outp.success("§e[Teleport] 你向对方发送了传送请求");
         sendText(dst,"§e[Teleport] "+name+" 想传送到你所在位置\n§e输入“/tpa ac” 接受 或 “/tpa de” 拒绝");
+        sendTPForm(name,0,(ServerPlayer*)dst);
+    }
+    if(a[0]=="gui"){
+        auto lis=new list<pair<string,std::function<void()> > >();
+        lis->push_back({
+            "To a player",[name]{
+                auto x=getMC()->getLevel()->getPlayer(name);
+                if(x)
+                {
+                    sendTPChoose((ServerPlayer*)x,"t");
+                }
+            }
+        });
+        lis->push_back({
+            "A player to you",[name]{
+                auto x=getMC()->getLevel()->getPlayer(name);
+                if(x)
+                {
+                    sendTPChoose((ServerPlayer*)x,"f");
+                }
+            }
+        });
+        gui_Buttons((ServerPlayer*)b.getEntity(),"Make TP request","Make TP request",lis);
     }
     if(a[0]=="ac") {
         //accept
@@ -239,6 +289,23 @@ static void oncmd_home(std::vector<string>& a,CommandOrigin const & b,CommandOut
         }
         outp.success("§e============");
     }
+    if(a[0]=="gui"){
+        if(homes.count(name)==0) homes[name]= {};
+        home& myh=homes[name];
+        auto lis=new list<pair<string,std::function<void()> > >();
+        for(int i=0; i<myh.cnt; ++i) {
+            string warpname=myh.vals[i].name;
+            lis->push_back({
+                "Go to "+warpname,
+                [warpname,name]()->void{
+                    auto x=getMC()->getLevel()->getPlayer(name);
+                    if(x)
+                        runcmdAs("home go "+SafeStr(warpname),x);
+                }
+            });
+        }
+        gui_Buttons((ServerPlayer*)b.getEntity(),"Go to home","home",lis);
+    }
     if(a[0]=="help") {
         outp.error("家指令列表:\n/home add 名字 ——添加一个家\n/home ls ——查看你的所有家\n/home go 名字 ——回家");
     }
@@ -275,6 +342,22 @@ static void oncmd_warp(std::vector<string>& a,CommandOrigin const & b,CommandOut
     }
     if(a[0]=="help") {
         outp.error("Warp指令列表:\n/warp ls ——查看地标列表\n/warp 地标名 ——前往一个地标");
+    }
+    if(a[0]=="gui"){
+        auto lis=new list<pair<string,std::function<void()> > >();
+        string nam=b.getName();
+        for(auto const& i:wps) {
+            string warpname=i.name;
+            lis->push_back({
+                "Go to "+warpname,
+                [warpname,nam]()->void{
+                    auto x=getMC()->getLevel()->getPlayer(nam);
+                    if(x)
+                        runcmdAs("warp "+SafeStr(warpname),x);
+                }
+            });
+        }
+        gui_Buttons((ServerPlayer*)b.getEntity(),"Go to warp","warp",lis);
     }
     //go
     for(auto const& i:wps) {

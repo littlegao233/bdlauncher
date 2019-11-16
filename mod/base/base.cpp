@@ -7,14 +7,70 @@
 #include<signal.h>
 #include <sys/stat.h>
 #include<unistd.h>
-using std::string;
 using std::list;
+using std::vector;
 #include"base.h"
+#include"hook.hpp"
+#include"cmdreg.hpp"
+#include"utils.hpp"
+#include<sstream>
 
 extern "C" {
-    void base_init(list<string>& modlist);
+   BDL_EXPORT void base_init(list<string>& modlist);
 }
 
+//export APIS
+void split_string(const std::string& s, std::vector<std::string>& v, const std::string& c)
+{
+  std::string::size_type pos1, pos2;
+  pos2 = s.find(c);
+  pos1 = 0;
+  while(std::string::npos != pos2)
+  {
+    v.push_back(s.substr(pos1, pos2-pos1));
+    pos1 = pos2 + c.size();
+    pos2 = s.find(c, pos1);
+  }
+  if(pos1 != s.length())
+    v.push_back(s.substr(pos1));
+}
+void execute_cmd_random(const vector<string>& chain){
+    int rd=rand()%chain.size();
+    //runcmd(chain[rd]);
+    execute_cmdchain(chain[rd],"",false);
+}
+bool execute_cmdchain(const string& chain_,const string& sp,bool chained){
+    string chain=chain_;
+    if(sp.size()){
+        vector<string> exp;
+        string tmp;
+        const string& name=sp[0]=='"'?sp:SafeStr(sp);
+        split_string(chain,exp,"%name%");
+        int expsz=exp.size();
+        int totsz=0;
+        for(auto& i:exp){
+            tmp+=i;
+            totsz++;
+            if(totsz<expsz){
+                tmp+=name;
+            }
+        }
+        chain=tmp;
+    }
+    if(chain[0]=='!'){
+        vector<string> dst;
+        split_string(chain.substr(1),dst,";");
+        execute_cmd_random(dst);
+        return true;
+    }
+    vector<string> dst;
+    split_string(chain,dst,",");
+    for(auto& i:dst){
+        auto res=runcmd(i);
+        if(!res.isSuccess() && chained) return false;
+    }
+    return true;
+}
 struct TeleportCommand {
     char filler[1024];
     TeleportCommand();
@@ -29,18 +85,17 @@ void sendText2(Player* a,string ct) {
     ((ServerPlayer*)a)->sendNetworkPacket(pk);
 }
 
-static void*(*tcmd)(void*);
 static TeleportCommand cmd_p;
 
 extern void load_helper(list<string>& modlist);
 void TeleportA(Actor& a,Vec3 b,AutomaticID<Dimension,int> c) {
     a.setPos(b);
     cmd_p.teleport(a,b,nullptr,c);
-    cmd_p.teleport(a,b,nullptr,c);
+    cmd_p.teleport(a,b,nullptr,c); //fix bugs about chunk sending
 }
 void KillActor(Actor* a) {
-    //a->kill();
-    (*(void ( **)(void*))(*(uintptr_t *)a + 1816LL))(a);
+    //!!! dirty workaround
+    ((Mob*)a)->kill();
 }
 Player* getplayer_byname(const string& name) {
     Minecraft* mc=getMC();
@@ -56,25 +111,6 @@ Player* getplayer_byname(const string& name) {
     return rt;
 }
 #define fcast(a,b) (*((a*)(&b)))
-void sendTransfer(Player* a,const string& ip,short port){
-
-}
-void readcfg(const string& fname,unordered_map<string,string>& out){    
-    FILE* a=fopen(fname.c_str(),"r");
-    char buf[1024];
-    if(a){
-        while(fgets(buf,1024,a)){
-            int l=strlen(buf);
-            int i;
-            for(i=0;buf[i];++i){
-                if(buf[i]=='=') break;
-            }
-            if(i==l) continue;
-            out[string(buf,i)]=string(buf+i+1,l-i-1);
-        }
-    }
-}
-
 Player* getplayer_byname2(const string& name) {
     Minecraft* mc=getMC();
     Level* lv=mc->getLevel();
@@ -98,112 +134,54 @@ Player* getplayer_byname2(const string& name) {
     });
     return rt;
 }
-static string sname("Server");
-MCRESULT runcmd(const string& a) {
-    return getMC()->getCommands()->requestCommandExecution(std::unique_ptr<CommandOrigin>((CommandOrigin*)new ServerCommandOrigin(sname,*(ServerLevel*)getMC()->getLevel(),(CommandPermissionLevel)5)),a,4,1);
-}
-typedef unsigned int u32;
-static u32(*tick_o)(Level*);
-static int tkl;
-void call_sht(int d);
-static u32 onTick(Level* a) {
-    int rt=tick_o(a);
-    tkl++;
-    if(tkl%(15*60*20)==0) //15min
-        call_sht(SIGABRT);
-    return rt;
-}
 
-static void (*dummy)(std::vector<std::string>&,CommandOrigin const &,CommandOutput &outp);
-static void mylex(std::string& oper,std::vector<std::string>& out) {
-    oper=oper+"  ";
-    int sz=oper.size();
-    const char* c=oper.c_str();
-    int t=0;
-    int st=0,ed;
-#define W c[i]
-    for(int i=0; i<sz; ++i) {
-        switch(t) {
-        case 0:
-            if(W=='"') t=1;
-            else t=2;
-            st=i;
-            break;
-        case 1:
-            if(W=='"') t=3,ed=i;
-            break;
-        case 2:
-            if(W==' ') t=4,ed=i;
-            break;
-        case 3:
-            out.push_back(std::string(c+st+1,ed-st-1));
-            t=0;
-            break;
-        case 4:
-            out.push_back(std::string(c+st,ed-st));
-            t=0;
-            i--;
-            break;
-        }
-    }
-}
-THook(void*,_ZN15CommandRegistry15registerCommandERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEPKc22CommandPermissionLevel11CommandFlagSB_,uintptr_t a1,uintptr_t a2,uintptr_t a3,uintptr_t a4,uintptr_t a5,uintptr_t a6){
-	return original(a1,a2,a3,a4,a5,0x40);
-}
-struct ACmd : Command {
-    CommandMessage msg;
-    void* callee;
-    ~ACmd() override = default;
-    void execute(CommandOrigin const &origin, CommandOutput &outp) override
-    {
-        std::string oper=msg.getMessage(origin);
-        std::vector<std::string> args;
-        mylex(oper,args);
-        ((typeof(dummy))callee)(args,origin,outp);
-    }
-};
-using std::string;
-struct req {
-    string name,desc;
-    void* fn;
-};
-static std::deque<req> reqs;
-void register_cmd(const std::string& name,void* fn,const std::string& desc) {
-    reqs.push_back({name,desc,fn});
-}
-static ACmd* chelper(void* fn) {
-    ACmd* fk=new ACmd();
-    fk->callee=fn;
-    return fk;
-}
-
-static void handle_regcmd(CommandRegistry& t) {
-    for(auto const& i:reqs) {
-        t.registerCommand(i.name,i.desc.c_str(),(CommandPermissionLevel)0,(CommandFlag)0,(CommandFlag)0x40);
-        t.registerOverload2(i.name.c_str(),wr_ret_uni((u64)i.fn,(char*)chelper),CommandParameterData(type_id<CommandRegistry, CommandMessage>(), &CommandRegistry::parse<CommandMessage>, "operation", (CommandParameterDataType)0, nullptr, offsetof(ACmd, msg), false, -1));
-    }
-    reqs.clear();
+void get_player_names(vector<string>& a){
+    getMC()->getLevel()->forEachPlayer([&](Player& tg)->bool{
+        a.push_back(tg.getName());
+        return true;
+    });
 }
 static Minecraft* MC;
-Minecraft* getMC() {
+BDL_EXPORT Minecraft* getMC() {
     return MC;
 }
-static void* sss,*ss;
-static void sss_new(Minecraft& a, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const& d, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const& b, PermissionsFile* c) {
+THook(void*,_ZN14ServerCommands19setupStandardServerER9MinecraftRKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEES9_P15PermissionsFile,Minecraft& a, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const& d, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const& b, PermissionsFile* c){
+    auto ret=original(a,d,b,c);
     printf("MC %p\n",&a);
-    ((typeof(&sss_new))sss)(a,d,b,c);
     MC=&a;
-    return;
+    return ret;
 }
-static void ss_new(CommandRegistry& thi,CommandRegistry& a) {
+THook(void*,_ZN10SayCommand5setupER15CommandRegistry,CommandRegistry& thi,CommandRegistry& a){
     handle_regcmd(thi);
-    ((typeof(&ss_new))ss)(thi,a);
-    return;
+    return original(thi,a);
+}
+struct DedicatedServer
+{
+    void stop();
+};
+DedicatedServer* dserver;
+THook(void*,_ZN15DedicatedServer5startERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE,DedicatedServer* t,string& b){
+    printf("starting server %p\n",t);
+    dserver=t;
+    return original(t,b);
+}
+void set_int_handler(void* fn);
+static void autostop(){
+        if(dserver){
+            printf("stoping server\n");
+            dserver->stop();
+        }
+}
+int getPlayerCount(){
+    return getMC()->getLevel()->getUserCount();
+}
+int getMobCount(){
+    return getMC()->getLevel()->getTickedMobCountPrevious();
 }
 void base_init(list<string>& modlist)
 {
-    printf("[MOD/BASE] loaded!\n");
-    tick_o=(typeof(tick_o))MyHook(dlsym(NULL,"_ZN5Level4tickEv"),fp(onTick));    			sss=MyHook(fp(dlsym(NULL,"_ZN14ServerCommands19setupStandardServerER9MinecraftRKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEES9_P15PermissionsFile")),fp(sss_new));
-    ss=MyHook(fp(dlsym(NULL,"_ZN10SayCommand5setupER15CommandRegistry")),fp(ss_new));
+    printf("[MOD/BASE] loaded!\n");  
+    srand(time(0));  	
+    set_int_handler(fp(autostop));		
     load_helper(modlist);
 }

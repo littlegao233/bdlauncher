@@ -9,6 +9,7 @@ class MapItemSavedData{
 	void setLocked();
 	void setPixel(unsigned int v, unsigned int x, unsigned int y); //use 0xffrrggbb
 	void save(LevelStorage&);
+	//Packet* getFullDataPacket() const; //may memory leak
 };
 /*
 class MapItem{

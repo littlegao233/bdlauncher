@@ -8,9 +8,16 @@
 #include<list>
 #include<atomic>
 #include<vector>
-#include<dlfcn.h>
 #include<cstdint>
 #include<cstring>
+#include<dlfcn.h>
+#include<unistd.h>
+#include<sys/fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
+#define BDL_EXPORT __attribute__((visibility("default")))
+
 using std::string;
 using std::unordered_map;
 using std::unordered_set;
@@ -20,8 +27,14 @@ using std::unique_ptr;
 #define access(ptr,type,off) (*((type*)(((uintptr_t)ptr)+off)))
 #define fcast(type,x) (*((type*)&x))
 #ifndef fp
-#define fp(x) ((void*)x)
+#define fp(x) ((void*)(x))
 #endif
+
+extern "C"{
+    void _ZN6PacketC2Ev(void*);
+    void _ZN16BinaryDataOutputC2ER12BinaryStream(void*,void*);
+}
+
 typedef void* UNK_64;
 class Player;
 class BinaryStream{
@@ -90,6 +103,8 @@ struct Level{
     LevelStorage* getLevelStorage();
     void forEachPlayer(std::function<bool(Player &)>);
     MapItemSavedData& getMapSavedData(std::unique_ptr<CompoundTag, std::default_delete<CompoundTag> > const&);
+    int getUserCount() const;
+    int getTickedMobCountPrevious() const;
 };
 struct ChunkBlockPos{
     unsigned char x,z;
@@ -240,10 +255,7 @@ class BinaryDataOutput:public IDataOutput{
     char filler[512];
     public:
     BinaryDataOutput(BinaryStream& x){
-        auto fn=dlsym(NULL,"_ZN16BinaryDataOutputC2ER12BinaryStream");
-        void(*fnn)(void*,void*);
-        fnn=(typeof(fnn))fn;
-        fnn(this,&x);
+        _ZN16BinaryDataOutputC2ER12BinaryStream(this,&x);
     }
     void writeByte(char);
 };
@@ -319,7 +331,11 @@ struct Dimension{
     int getId() const;
     void sendPacketForPosition(BlockPos const&, Packet const&, Player const*);
 };
-class Actor {
+class TickingArea {
+public:
+  BlockSource *getBlockSource();
+};
+class Actor:public TickingArea {
     public:
         const std::string &getNameTag() const;
         Vec3 const &getPos() const;
@@ -339,6 +355,7 @@ class Mob : public Actor {
         float getYHeadRot() const;
         bool isGliding() const;
         bool isJumping() const;
+        void kill();
 };
 class Certificate;
 class ExtendedCertificate {
@@ -366,7 +383,7 @@ class Player : public Mob {
   ItemStack &getCarriedItem() const;
         std::string getXUID() const { return ExtendedCertificate::getXuid(getCertificate()); }
     uint64_t attack(Actor &);
-
+    bool isCreative(void)const;
 };
 class ServerPlayer : public Player {
     public:
@@ -384,7 +401,7 @@ struct ItemStackBase{
         bool isOffhandItem() const;
         unsigned int getIdAuxEnchanted() const;
         bool isNull() const;
-        unique_ptr<CompoundTag,std::default_delete<CompoundTag>> getUserData() const;
+        CompoundTag** getUserData() const;
 };
 struct ItemStack:ItemStackBase {
 };
@@ -414,10 +431,9 @@ struct InventorySource {
     }
 };
 
-
-struct MyPkt{
+struct MyPkt:Packet{
     void** vtbl;
-    char filler[64];
+    char filler[256];
     int id;
     std::function<void (void*,BinaryStream&)> realexe;
     static int dummy(){return 0;}
@@ -433,10 +449,7 @@ struct MyPkt{
     fp(MyPkt::dummy) //disallow batch
     };
     void ParentInit(){
-        auto fn=dlsym(NULL,"_ZN6PacketC2Ev");
-        void(*fnn)(void*);
-        fnn=(typeof(fnn))fn;
-        fnn(this);
+        _ZN6PacketC2Ev(this);
     }
     MyPkt(int idx,std::function<void (void*,BinaryStream&)> callb){
         ParentInit();
